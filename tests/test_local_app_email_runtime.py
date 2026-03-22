@@ -262,10 +262,10 @@ async def test_handle_message_creates_google_doc_preview(monkeypatch: pytest.Mon
     runtime.router = IntentRouter()
     runtime.config.google_workspace.enabled = True
 
-    async def _fake_generate_doc(_config: Config, _instruction: str):
+    async def _fake_generate_doc(_instruction: str):
         return "Project Notes", "Agenda\n\n1. Intro\n2. Next steps"
 
-    monkeypatch.setattr("prj3bot.local_app.runtime._gog_generate_doc_draft", _fake_generate_doc)
+    monkeypatch.setattr(runtime, "_generate_google_doc_draft", _fake_generate_doc)
 
     class _FakeClient:
         def docs_create(self, title: str, content: str):
@@ -290,3 +290,68 @@ async def test_handle_message_creates_google_doc_preview(monkeypatch: pytest.Mon
     assert result["title"] == "Project Notes"
     assert "Agenda" in result["content"]
     assert result["url"] == "https://docs.google.com/document/d/doc123/edit"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_creates_google_doc_preview_for_plain_doc_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _make_runtime()
+    runtime.router = IntentRouter()
+
+    async def _fake_generate_doc(_instruction: str):
+        return "Narendra Modi", "Narendra Modi is the Prime Minister of India."
+
+    monkeypatch.setattr(runtime, "_generate_google_doc_draft", _fake_generate_doc)
+
+    class _FakeClient:
+        def docs_create(self, title: str, content: str):
+            assert title == "Narendra Modi"
+            assert "Prime Minister of India" in content
+            return {
+                "id": "doc456",
+                "title": title,
+                "url": "https://docs.google.com/document/d/doc456/edit",
+            }
+
+    monkeypatch.setattr(
+        "prj3bot.local_app.runtime.GoogleWorkspaceClient.from_config",
+        lambda _cfg: _FakeClient(),
+    )
+
+    result = await runtime.handle_message(
+        "create a doc containing information of narendra modi",
+        session_id="s1",
+    )
+
+    assert result["type"] == "document_preview"
+    assert result["document_id"] == "doc456"
+    assert result["title"] == "Narendra Modi"
+    assert "Prime Minister of India" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_merges_attachment_context_into_chat() -> None:
+    runtime = _make_runtime()
+    runtime.router = IntentRouter()
+    captured: dict[str, object] = {}
+
+    async def _fake_handle_chat(message: str, session_id: str, media_paths=None) -> str:
+        captured["message"] = message
+        captured["media_paths"] = media_paths
+        return "Done."
+
+    runtime._handle_chat = _fake_handle_chat  # type: ignore[method-assign]
+
+    result = await runtime.handle_message(
+        "Summarize this file",
+        session_id="s1",
+        attachments=[{"name": "notes.txt", "content": "Project scope\nTimeline"}],
+        transcription="spoken context",
+        media_paths=["/tmp/example.png"],
+    )
+
+    assert result["type"] == "assistant_message"
+    assert "Attachment: notes.txt" in str(captured["message"])
+    assert "spoken context" in str(captured["message"])
+    assert captured["media_paths"] == ["/tmp/example.png"]

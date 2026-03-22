@@ -70,6 +70,14 @@ def test_intent_router_detects_docs_create() -> None:
     assert intent.action == "google_tools"
 
 
+def test_intent_router_detects_plain_doc_create() -> None:
+    router = IntentRouter()
+    intent = router.detect("Create a doc containing information of Narendra Modi")
+
+    assert intent.name == "google_tools"
+    assert intent.action == "google_tools"
+
+
 @pytest.mark.asyncio
 async def test_google_workspace_tool_docs_create() -> None:
     tool = GoogleWorkspaceTool(_google_config())

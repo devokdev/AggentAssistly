@@ -4,6 +4,10 @@
   const typing = document.getElementById("typing");
   const composer = document.getElementById("composer");
   const input = document.getElementById("messageInput");
+  const fileInput = document.getElementById("fileInput");
+  const attachFileBtn = document.getElementById("attachFile");
+  const recordVoiceBtn = document.getElementById("recordVoice");
+  const attachmentTray = document.getElementById("attachmentTray");
   const newChatBtn = document.getElementById("newChat");
   const historyList = document.getElementById("historyList");
 
@@ -27,6 +31,9 @@
   localStorage.setItem(storageKey, sessionId);
   let sessions = JSON.parse(localStorage.getItem(historyStorageKey) || "[]");
   let activeDraftId = "";
+  let pendingFiles = [];
+  let mediaRecorder = null;
+  let recordedChunks = [];
 
   function show(el) {
     el.classList.remove("hidden");
@@ -61,6 +68,38 @@
       return;
     }
     hide(typing);
+  }
+
+  function renderAttachments() {
+    attachmentTray.innerHTML = "";
+    if (!pendingFiles.length) {
+      hide(attachmentTray);
+      return;
+    }
+    show(attachmentTray);
+    pendingFiles.forEach((file, index) => {
+      const pill = document.createElement("div");
+      pill.className = "attachment-pill";
+      const label = document.createElement("span");
+      label.textContent = file.name;
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "attachment-remove";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => {
+        pendingFiles.splice(index, 1);
+        renderAttachments();
+      });
+      pill.append(label, removeBtn);
+      attachmentTray.appendChild(pill);
+    });
+  }
+
+  function queueFiles(files) {
+    for (const file of files) {
+      pendingFiles.push(file);
+    }
+    renderAttachments();
   }
 
   function saveSessions() {
@@ -299,6 +338,16 @@
 
     headingGroup.append(title, subtitle);
 
+    if (data.url) {
+      const directLink = document.createElement("a");
+      directLink.className = "doc-preview-link";
+      directLink.href = data.url;
+      directLink.target = "_blank";
+      directLink.rel = "noopener noreferrer";
+      directLink.textContent = "View Google Doc";
+      headingGroup.appendChild(directLink);
+    }
+
     const actions = document.createElement("div");
     actions.className = "doc-preview-actions";
 
@@ -339,14 +388,46 @@
     openBtn.target = "_blank";
     openBtn.rel = "noopener noreferrer";
 
-    actions.append(copyBtn, pdfBtn, docxBtn, openBtn);
+    const openHereBtn = document.createElement("button");
+    openHereBtn.type = "button";
+    openHereBtn.className = "btn ghost doc-action";
+    openHereBtn.textContent = "Open Here";
+
+    actions.append(copyBtn, pdfBtn, docxBtn, openHereBtn, openBtn);
     header.append(headingGroup, actions);
 
     const preview = document.createElement("div");
     preview.className = "doc-preview-body";
     preview.textContent = data.content || "";
 
-    card.append(header, preview);
+    const embedWrap = document.createElement("div");
+    embedWrap.className = "doc-embed hidden";
+
+    const iframe = document.createElement("iframe");
+    iframe.className = "doc-embed-frame";
+    if (data.url) {
+      iframe.src = data.url.replace(/\/edit(?:\?.*)?$/i, "/preview");
+    }
+    iframe.loading = "lazy";
+    iframe.referrerPolicy = "strict-origin-when-cross-origin";
+    embedWrap.appendChild(iframe);
+
+    openHereBtn.addEventListener("click", () => {
+      const isHidden = embedWrap.classList.contains("hidden");
+      if (!data.url) {
+        return;
+      }
+      if (isHidden) {
+        embedWrap.classList.remove("hidden");
+        openHereBtn.textContent = "Hide Viewer";
+      } else {
+        embedWrap.classList.add("hidden");
+        openHereBtn.textContent = "Open Here";
+      }
+      messages.scrollTop = messages.scrollHeight;
+    });
+
+    card.append(header, preview, embedWrap);
     container.appendChild(card);
     messages.scrollTop = messages.scrollHeight;
   }
@@ -386,11 +467,24 @@
     upsertSessionPreview(text);
     toggleTyping(true);
     try {
-      const response = await fetch("/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, session_id: sessionId }),
-      });
+      const hasFiles = pendingFiles.length > 0;
+      let response;
+      if (hasFiles) {
+        const formData = new FormData();
+        formData.append("message", text);
+        formData.append("session_id", sessionId);
+        pendingFiles.forEach((file) => formData.append("files", file, file.name));
+        response = await fetch("/chat", {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        response = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, session_id: sessionId }),
+        });
+      }
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.error || "Request failed");
@@ -410,6 +504,9 @@
         const msg = addMessage("assistant", "");
         await streamText(msg, data.reply || "Done.");
       }
+      pendingFiles = [];
+      renderAttachments();
+      fileInput.value = "";
     } catch (error) {
       const msg = addMessage("assistant", "");
       await streamText(msg, `I could not complete that request: ${error.message}`);
@@ -437,6 +534,42 @@
   input.addEventListener("input", () => {
     input.style.height = "auto";
     input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  });
+
+  attachFileBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    queueFiles(Array.from(fileInput.files || []));
+    fileInput.value = "";
+  });
+
+  recordVoiceBtn.addEventListener("click", async () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size) {
+          recordedChunks.push(event.data);
+        }
+      });
+      mediaRecorder.addEventListener("stop", () => {
+        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+        const ext = blob.type.includes("ogg") ? "ogg" : "webm";
+        const file = new File([blob], `voice-note.${ext}`, { type: blob.type || "audio/webm" });
+        queueFiles([file]);
+        stream.getTracks().forEach((track) => track.stop());
+        recordVoiceBtn.textContent = "Voice";
+      });
+      mediaRecorder.start();
+      recordVoiceBtn.textContent = "Stop";
+    } catch (_) {
+      const msg = addMessage("assistant", "");
+      streamText(msg, "Voice recording is unavailable in this browser.");
+    }
   });
 
   newChatBtn.addEventListener("click", () => {

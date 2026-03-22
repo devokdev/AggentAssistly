@@ -205,6 +205,38 @@ body {
   background: linear-gradient(to top, var(--bg) 72%, rgba(244, 247, 251, 0.35) 88%, transparent);
 }
 
+.attachment-tray {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attachment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+}
+
+.attachment-remove {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.composer-actions {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
 textarea,
 input {
   width: 100%;
@@ -430,6 +462,17 @@ label {
   font-size: 0.92rem;
 }
 
+.doc-preview-link {
+  color: #2563eb;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.doc-preview-link:hover {
+  text-decoration: underline;
+}
+
 .doc-preview-actions {
   display: flex;
   flex-wrap: wrap;
@@ -450,6 +493,19 @@ label {
   padding: 18px;
   white-space: pre-wrap;
   line-height: 1.72;
+}
+
+.doc-embed {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.doc-embed-frame {
+  width: 100%;
+  min-height: 560px;
+  border: 0;
 }
 
 #emailBody {

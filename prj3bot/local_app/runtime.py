@@ -9,15 +9,18 @@ from pathlib import Path
 import re
 from typing import Any
 from uuid import uuid4
+from zipfile import ZipFile
+import json
 
 from loguru import logger
 
 from prj3bot.agent.loop import AgentLoop
+from prj3bot.bus.events import InboundMessage
 from prj3bot.bus.queue import MessageBus
 from prj3bot.channels.email import EmailChannel
 from prj3bot.config.loader import load_config, save_config
 from prj3bot.config.schema import Config
-from prj3bot.cli.commands import _gog_generate_doc_draft
+from prj3bot.cli.commands import _gog_generate_doc_draft, _gog_parse_json_object
 from prj3bot.local_app.email_assistant import EmailAssistant
 from prj3bot.local_app.gmail_reader import GmailReader, GmailReaderError
 from prj3bot.local_app.intent_router import IntentRouter
@@ -111,11 +114,44 @@ def _extract_email_reference_hint(message: str) -> str:
     return ""
 
 
+def _attachment_context_block(attachments: list[dict[str, str]] | None, transcription: str = "") -> str:
+    parts: list[str] = []
+    if transcription.strip():
+        parts.append(f"[Voice Transcription]\n{transcription.strip()}")
+    for item in attachments or []:
+        name = (item.get("name") or "attachment").strip()
+        content = (item.get("content") or "").strip()
+        if content:
+            parts.append(f"[Attachment: {name}]\n{content}")
+    return "\n\n".join(parts).strip()
+
+
+def _merge_prompt_with_context(message: str, attachments: list[dict[str, str]] | None, transcription: str = "") -> str:
+    context = _attachment_context_block(attachments, transcription=transcription)
+    if not context:
+        return message
+    base = (message or "").strip() or "Please use the provided attachment context."
+    return f"{base}\n\nUse this uploaded context when responding:\n\n{context}"
+
+
 def _looks_like_google_doc_request(message: str) -> bool:
     normalized = _normalize_lookup_text(message)
     has_doc_word = any(term in normalized for term in ("google doc", "google docs", "document", "doc"))
     has_create_word = any(term in normalized for term in ("create", "make", "generate", "write", "draft"))
     return has_doc_word and has_create_word
+
+
+def _extract_doc_title_hint(message: str) -> str:
+    normalized = re.sub(r"\s+", " ", (message or "").strip())
+    patterns = (
+        r"\b(?:titled|called|named)\s+['\"]?([^'\"]+?)['\"]?(?:\s+(?:about|on|for|with)\b|$)",
+        r"\btitle\s+['\"]?([^'\"]+?)['\"]?(?:\s+(?:about|on|for|with)\b|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
 
 
 def _format_email_date(value: str) -> str:
@@ -302,9 +338,26 @@ class LocalAppRuntime:
         self.email_assistant = EmailAssistant(self.config)
         self.agent_loop = self._build_agent_loop(self.config, self.bus)
 
-    async def handle_message(self, message: str, session_id: str, email_uid: str = "") -> dict[str, Any]:
+    async def handle_message(
+        self,
+        message: str,
+        session_id: str,
+        email_uid: str = "",
+        media_paths: list[str] | None = None,
+        attachments: list[dict[str, str]] | None = None,
+        transcription: str = "",
+    ) -> dict[str, Any]:
+        message = _merge_prompt_with_context(message, attachments, transcription=transcription)
         intent = self.router.detect_intent(message)
         logger.info("Local intent {} for session {}", intent.name, session_id)
+
+        if _looks_like_google_doc_request(message):
+            result = await self._create_google_doc_preview(message)
+            return {
+                **result,
+                "intent": intent.to_dict(),
+                "session_id": session_id,
+            }
 
         if intent.action == "read_email":
             n = int(intent.parameters.get("count") or 3)
@@ -340,15 +393,7 @@ class LocalAppRuntime:
                 "session_id": session_id,
             }
 
-        if intent.action == "google_tools" and _looks_like_google_doc_request(message):
-            result = await self._create_google_doc_preview(message)
-            return {
-                **result,
-                "intent": intent.to_dict(),
-                "session_id": session_id,
-            }
-
-        reply = await self._handle_chat(message, session_id)
+        reply = await self._handle_chat(message, session_id, media_paths=media_paths or [])
         return {
             "type": "assistant_message",
             "reply": reply,
@@ -611,11 +656,7 @@ class LocalAppRuntime:
         }
 
     async def _create_google_doc_preview(self, message: str) -> dict[str, Any]:
-        draft = await _gog_generate_doc_draft(self.config, message)
-        if isinstance(draft, str):
-            raise ValueError(draft)
-
-        title, body = draft
+        title, body = await self._generate_google_doc_draft(message)
         try:
             client = GoogleWorkspaceClient.from_config(self.config.google_workspace)
             created = await asyncio.to_thread(client.docs_create, title, body)
@@ -633,6 +674,48 @@ class LocalAppRuntime:
             "url": created.get("url", ""),
             "reply": f"Google Doc created: {created.get('title', title)}",
         }
+
+    async def _generate_google_doc_draft(self, message: str) -> tuple[str, str]:
+        provider = _build_provider(self.config)
+        title_hint = _extract_doc_title_hint(message)
+
+        if provider is not None:
+            response = await provider.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You create complete Google Docs. Return strict JSON only with keys "
+                            "\"title\" and \"body\". The body must be the full finished document, "
+                            "not notes about the document. Include headings and paragraph breaks when useful. "
+                            "Do not return an empty body."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Create the full document for this request:\n{message}\n\n"
+                            f"Preferred title: {title_hint or 'Choose a good title based on the request.'}"
+                        ),
+                    },
+                ],
+                model=self.config.agents.defaults.model,
+                max_tokens=min(max(self.config.agents.defaults.max_tokens, 1400), 8192),
+                temperature=0.2,
+                reasoning_effort=self.config.agents.defaults.reasoning_effort,
+            )
+            parsed = _gog_parse_json_object(response.content or "")
+            if parsed:
+                title = str(parsed.get("title", "")).strip() or title_hint or "prj3bot document"
+                body = str(parsed.get("body", "")).strip()
+                if body:
+                    return title, body
+
+        fallback = await _gog_generate_doc_draft(self.config, message)
+        if isinstance(fallback, str):
+            raise ValueError(fallback)
+        title, body = fallback
+        return title.strip() or title_hint or "prj3bot document", body.strip()
 
     def list_emails(self, limit: int = 10, unread_only: bool = False) -> list[dict[str, Any]]:
         result = self.get_latest_emails(limit, unread_only=unread_only)
@@ -655,12 +738,15 @@ class LocalAppRuntime:
             )
         return emails
 
-    async def _handle_chat(self, message: str, session_id: str) -> str:
+    async def _handle_chat(self, message: str, session_id: str, media_paths: list[str] | None = None) -> str:
         if not self.agent_loop:
             return "Assistant is ready, but no model is configured yet. Open Settings to finish setup."
-        return await self.agent_loop.process_direct(
-            message,
-            session_key=f"local:{session_id}",
+        msg = InboundMessage(
             channel="local",
+            sender_id="user",
             chat_id=session_id,
+            content=message,
+            media=media_paths or [],
         )
+        response = await self.agent_loop._process_message(msg, session_key=f"local:{session_id}")
+        return response.content if response else ""

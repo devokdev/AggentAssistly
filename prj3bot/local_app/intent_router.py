@@ -138,6 +138,9 @@ class IntentRouter:
         google_cues = (
             "google doc",
             "google docs",
+            "doc",
+            "docs",
+            "document",
             "drive",
             "sheet",
             "spreadsheet",

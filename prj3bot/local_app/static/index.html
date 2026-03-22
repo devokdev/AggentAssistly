@@ -26,8 +26,14 @@
         <section id="messages" class="messages" aria-live="polite"></section>
         <div id="typing" class="typing hidden"><span></span><span></span><span></span></div>
         <form id="composer" class="composer">
+          <div id="attachmentTray" class="attachment-tray hidden"></div>
+          <input id="fileInput" type="file" class="hidden" multiple />
           <textarea id="messageInput" rows="1" placeholder="Message AgentAssistly..."></textarea>
-          <button type="submit" class="btn">Send</button>
+          <div class="composer-actions">
+            <button id="attachFile" type="button" class="btn ghost">Attach</button>
+            <button id="recordVoice" type="button" class="btn ghost">Voice</button>
+            <button type="submit" class="btn">Send</button>
+          </div>
         </form>
       </div>
     </main>
