@@ -1,0 +1,321 @@
+(function () {
+  const shell = document.getElementById("appShell");
+  const messages = document.getElementById("messages");
+  const typing = document.getElementById("typing");
+  const composer = document.getElementById("composer");
+  const input = document.getElementById("messageInput");
+  const newChatBtn = document.getElementById("newChat");
+  const historyList = document.getElementById("historyList");
+
+  const onboarding = document.getElementById("onboarding");
+  const configForm = document.getElementById("configForm");
+  const onboardingError = document.getElementById("onboardingError");
+  const openSettings = document.getElementById("openSettings");
+
+  const emailModal = document.getElementById("emailModal");
+  const emailTo = document.getElementById("emailTo");
+  const emailSubject = document.getElementById("emailSubject");
+  const emailBody = document.getElementById("emailBody");
+  const sendEmailBtn = document.getElementById("sendEmail");
+  const cancelEmailBtn = document.getElementById("cancelEmail");
+  const emailError = document.getElementById("emailError");
+  const emailContext = document.getElementById("emailContext");
+
+  const storageKey = "agentassistly.desktop.session";
+  const historyStorageKey = "agentassistly.desktop.history";
+  let sessionId = localStorage.getItem(storageKey) || crypto.randomUUID();
+  localStorage.setItem(storageKey, sessionId);
+  let sessions = JSON.parse(localStorage.getItem(historyStorageKey) || "[]");
+  let activeDraftId = "";
+
+  function show(el) {
+    el.classList.remove("hidden");
+  }
+
+  function hide(el) {
+    el.classList.add("hidden");
+  }
+
+  function addMessage(role, text) {
+    const bubble = document.createElement("article");
+    bubble.className = `bubble ${role}`;
+    bubble.dataset.role = role;
+    bubble.textContent = text || "";
+    messages.appendChild(bubble);
+    messages.scrollTop = messages.scrollHeight;
+    return bubble;
+  }
+
+  function toggleTyping(isLoading) {
+    if (isLoading) {
+      show(typing);
+      return;
+    }
+    hide(typing);
+  }
+
+  function saveSessions() {
+    localStorage.setItem(historyStorageKey, JSON.stringify(sessions.slice(0, 30)));
+  }
+
+  function upsertSessionPreview(text) {
+    const cleanText = (text || "").trim() || "New chat";
+    const existing = sessions.find((entry) => entry.id === sessionId);
+    if (existing) {
+      existing.title = existing.title === "New chat" ? cleanText.slice(0, 42) : existing.title;
+      existing.updatedAt = Date.now();
+    } else {
+      sessions.unshift({
+        id: sessionId,
+        title: cleanText.slice(0, 42),
+        updatedAt: Date.now(),
+      });
+    }
+    sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    saveSessions();
+    renderHistory();
+  }
+
+  function renderHistory() {
+    historyList.innerHTML = "";
+    if (!sessions.length) {
+      const empty = document.createElement("li");
+      empty.className = "history-empty";
+      empty.textContent = "No chats yet";
+      historyList.appendChild(empty);
+      return;
+    }
+    sessions.forEach((entry) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.className = `history-item ${entry.id === sessionId ? "active" : ""}`;
+      button.type = "button";
+      button.textContent = entry.title || "New chat";
+      button.addEventListener("click", () => {
+        sessionId = entry.id;
+        localStorage.setItem(storageKey, sessionId);
+        messages.innerHTML = "";
+        addMessage("assistant", "Session loaded. Continue the conversation.");
+        renderHistory();
+      });
+      item.appendChild(button);
+      historyList.appendChild(item);
+    });
+  }
+
+  async function streamText(el, text) {
+    const source = (text || "").toString();
+    if (!source) {
+      el.textContent = "";
+      return;
+    }
+    const chunks = source.match(/.{1,4}/g) || [source];
+    let acc = "";
+    for (const chunk of chunks) {
+      acc += chunk;
+      el.textContent = acc;
+      messages.scrollTop = messages.scrollHeight;
+      // subtle streaming feel without backend streaming
+      await new Promise((resolve) => setTimeout(resolve, 12));
+    }
+  }
+
+  async function loadConfigStatus() {
+    try {
+      const response = await fetch("/config/status");
+      const data = await response.json();
+      if (data.onboarding_complete) {
+        hide(onboarding);
+        show(shell);
+        if (!messages.children.length) {
+          addMessage("assistant", "AgentAssistly is ready.");
+        }
+      } else {
+        show(onboarding);
+      }
+    } catch (_) {
+      show(onboarding);
+    }
+  }
+
+  function collectConfigPayload() {
+    const fields = [
+      "geminiApiKey",
+      "googleCredentialsJson",
+      "imapHost",
+      "imapPort",
+      "imapUsername",
+      "imapPassword",
+      "smtpHost",
+      "smtpPort",
+      "smtpUsername",
+      "smtpPassword",
+      "fromAddress",
+    ];
+    const payload = {};
+    for (const field of fields) {
+      payload[field] = document.getElementById(field).value.trim();
+    }
+    return payload;
+  }
+
+  async function saveConfig(event) {
+    event.preventDefault();
+    onboardingError.textContent = "";
+    const payload = collectConfigPayload();
+    try {
+      const response = await fetch("/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Could not save config");
+      }
+      await loadConfigStatus();
+    } catch (error) {
+      onboardingError.textContent = error.message;
+    }
+  }
+
+  function openEmailModal(preview) {
+    activeDraftId = preview.draft_id || "";
+    emailTo.value = (preview.to || []).join(", ");
+    emailSubject.value = preview.subject || "";
+    emailBody.value = preview.body || "";
+    emailError.textContent = "";
+    if (preview.thread_context) {
+      emailContext.textContent = `Reply context loaded from thread:\n\n${preview.thread_context}`;
+      show(emailContext);
+    } else {
+      emailContext.textContent = "";
+      hide(emailContext);
+    }
+    show(emailModal);
+  }
+
+  function closeEmailModal() {
+    activeDraftId = "";
+    emailContext.textContent = "";
+    hide(emailContext);
+    hide(emailModal);
+  }
+
+  async function sendEditedEmail() {
+    emailError.textContent = "";
+    const payload = {
+      draft_id: activeDraftId,
+      to: emailTo.value,
+      subject: emailSubject.value.trim(),
+      body: emailBody.value.trim(),
+    };
+    if (!payload.to || !payload.subject || !payload.body) {
+      emailError.textContent = "Recipient, subject, and body are required.";
+      return;
+    }
+    try {
+      const response = await fetch("/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to send email");
+      }
+      addMessage("assistant", data.reply || "Email sent.");
+      upsertSessionPreview(emailSubject.value);
+      closeEmailModal();
+    } catch (error) {
+      emailError.textContent = error.message;
+    }
+  }
+
+  async function sendChatMessage(text) {
+    addMessage("user", text);
+    upsertSessionPreview(text);
+    toggleTyping(true);
+    try {
+      const response = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, session_id: sessionId }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Request failed");
+      }
+
+      if (data.type === "email_preview") {
+        const msg = addMessage("assistant", "");
+        await streamText(msg, "I drafted an email. Please review and send.");
+        openEmailModal(data);
+      } else if (data.type === "email_list") {
+        const lines = (data.items || data.emails || []).map(
+          (item, idx) => {
+            const parts = [
+              `${idx + 1}. ${item.subject || "(No Subject)"}`,
+              `From: ${item.from || "Unknown sender"}`,
+            ];
+            if (item.date) {
+              parts.push(`Date: ${item.date}`);
+            }
+            parts.push(`Preview: ${item.preview || item.snippet || "(No preview)"}`);
+            return parts.join("\n");
+          }
+        );
+        const msg = addMessage("assistant", "");
+        await streamText(msg, lines.length ? lines.join("\n\n") : "No emails found.");
+      } else {
+        const msg = addMessage("assistant", "");
+        await streamText(msg, data.reply || "Done.");
+      }
+    } catch (error) {
+      const msg = addMessage("assistant", "");
+      await streamText(msg, `I could not complete that request: ${error.message}`);
+    } finally {
+      toggleTyping(false);
+    }
+  }
+
+  composer.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    input.style.height = "auto";
+    sendChatMessage(text);
+  });
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      composer.requestSubmit();
+    }
+  });
+
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  });
+
+  newChatBtn.addEventListener("click", () => {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem(storageKey, sessionId);
+    sessions.unshift({ id: sessionId, title: "New chat", updatedAt: Date.now() });
+    saveSessions();
+    renderHistory();
+    messages.innerHTML = "";
+    addMessage("assistant", "New chat started.");
+    input.focus();
+  });
+
+  configForm.addEventListener("submit", saveConfig);
+  openSettings.addEventListener("click", () => show(onboarding));
+  sendEmailBtn.addEventListener("click", sendEditedEmail);
+  cancelEmailBtn.addEventListener("click", closeEmailModal);
+
+  renderHistory();
+  loadConfigStatus();
+})();

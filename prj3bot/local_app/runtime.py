@@ -1,0 +1,464 @@
+"""Local runtime for desktop-first prj3bot assistant."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+from typing import Any
+from uuid import uuid4
+
+from loguru import logger
+
+from prj3bot.agent.loop import AgentLoop
+from prj3bot.bus.queue import MessageBus
+from prj3bot.channels.email import EmailChannel
+from prj3bot.config.loader import load_config, save_config
+from prj3bot.config.schema import Config
+from prj3bot.local_app.email_assistant import EmailAssistant
+from prj3bot.local_app.gmail_reader import GmailReader, GmailReaderError
+from prj3bot.local_app.intent_router import IntentRouter
+from prj3bot.utils.helpers import sync_workspace_templates
+
+
+def _build_provider(config: Config):
+    """Return an LLM provider if one is configured, otherwise None."""
+    from prj3bot.providers.custom_provider import CustomProvider
+    from prj3bot.providers.litellm_provider import LiteLLMProvider
+    from prj3bot.providers.openai_codex_provider import OpenAICodexProvider
+    from prj3bot.providers.registry import find_by_name
+
+    model = config.agents.defaults.model
+    provider_name = config.get_provider_name(model)
+    provider_cfg = config.get_provider(model)
+
+    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
+        return OpenAICodexProvider(default_model=model)
+
+    if provider_name == "custom":
+        return CustomProvider(
+            api_key=provider_cfg.api_key if provider_cfg else "",
+            api_base=config.get_api_base(model) or "http://localhost:8000/v1",
+            default_model=model,
+        )
+
+    spec = find_by_name(provider_name) if provider_name else None
+    if not model.startswith("bedrock/") and not (provider_cfg and provider_cfg.api_key) and not (
+        spec and spec.is_oauth
+    ):
+        return None
+
+    return LiteLLMProvider(
+        api_key=provider_cfg.api_key if provider_cfg else None,
+        api_base=config.get_api_base(model),
+        default_model=model,
+        extra_headers=provider_cfg.extra_headers if provider_cfg else None,
+        provider_name=provider_name,
+    )
+
+
+def _preview_email(content: str, max_len: int = 160) -> str:
+    body = (content or "").split("\n\n", 1)
+    text = body[1].strip() if len(body) > 1 else (content or "").strip()
+    text = " ".join(text.split())
+    return text[: max_len - 3] + "..." if len(text) > max_len else text
+
+
+def _imap_preview_from_content(content: str) -> str:
+    return _preview_email(content or "")
+
+
+@dataclass
+class LocalAppRuntime:
+    """Shared runtime state for the desktop app."""
+
+    config: Config
+    bus: MessageBus
+    router: IntentRouter
+    email_channel: EmailChannel
+    gmail_reader: GmailReader
+    email_assistant: EmailAssistant
+    agent_loop: AgentLoop | None
+    workspace: Path
+    drafts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_email_by_session: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_email_list_by_session: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+    @classmethod
+    def create(cls, config: Config | None = None) -> "LocalAppRuntime":
+        config = config or load_config()
+        sync_workspace_templates(config.workspace_path)
+
+        bus = MessageBus()
+        router = IntentRouter()
+        email_channel = EmailChannel(config.channels.email, bus)
+        gmail_reader = GmailReader(config)
+        email_assistant = EmailAssistant(config)
+        agent_loop = cls._build_agent_loop(config, bus)
+        return cls(
+            config=config,
+            bus=bus,
+            router=router,
+            email_channel=email_channel,
+            gmail_reader=gmail_reader,
+            email_assistant=email_assistant,
+            agent_loop=agent_loop,
+            workspace=config.workspace_path,
+        )
+
+    @staticmethod
+    def _build_agent_loop(config: Config, bus: MessageBus) -> AgentLoop | None:
+        provider = _build_provider(config)
+        if provider is None:
+            return None
+        return AgentLoop(
+            bus=bus,
+            provider=provider,
+            workspace=config.workspace_path,
+            model=config.agents.defaults.model,
+            temperature=config.agents.defaults.temperature,
+            max_tokens=config.agents.defaults.max_tokens,
+            max_iterations=config.agents.defaults.max_tool_iterations,
+            memory_window=config.agents.defaults.memory_window,
+            reasoning_effort=config.agents.defaults.reasoning_effort,
+            brave_api_key=config.tools.web.search.api_key or None,
+            web_proxy=config.tools.web.proxy or None,
+            exec_config=config.tools.exec,
+            restrict_to_workspace=config.tools.restrict_to_workspace,
+            mcp_servers=config.tools.mcp_servers,
+            channels_config=config.channels,
+            google_workspace_config=config.google_workspace,
+        )
+
+    def config_status(self) -> dict[str, Any]:
+        google_creds_ready = bool(self.config.google_workspace.credentials_json.strip()) or Path(
+            self.config.google_workspace.credentials_path
+        ).expanduser().exists()
+        gemini_ready = bool(self.config.providers.gemini.api_key.strip())
+        return {
+            "gemini_configured": gemini_ready,
+            "google_configured": google_creds_ready,
+            "onboarding_complete": gemini_ready and google_creds_ready,
+        }
+
+    def save_user_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        gemini_api_key = str(payload.get("geminiApiKey", "")).strip()
+        google_credentials_json = str(payload.get("googleCredentialsJson", "")).strip()
+
+        if not gemini_api_key:
+            raise ValueError("Gemini API key is required.")
+        if not google_credentials_json:
+            raise ValueError("Google credentials JSON is required.")
+
+        self.config.providers.gemini.api_key = gemini_api_key
+        self.config.agents.defaults.model = "gemini/gemini-2.5-flash-lite"
+        self.config.google_workspace.enabled = True
+        self.config.google_workspace.credentials_json = google_credentials_json
+        self.config.channels.email.enabled = True
+        self.config.channels.email.consent_granted = True
+
+        for field_name in (
+            "imapHost",
+            "imapPort",
+            "imapUsername",
+            "imapPassword",
+            "smtpHost",
+            "smtpPort",
+            "smtpUsername",
+            "smtpPassword",
+            "fromAddress",
+        ):
+            value = payload.get(field_name)
+            if value in (None, ""):
+                continue
+            snake_name = "".join([f"_{c.lower()}" if c.isupper() else c for c in field_name]).lstrip("_")
+            if snake_name in {"imap_port", "smtp_port"}:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"{field_name} must be a number.")
+            setattr(self.config.channels.email, snake_name, value)
+
+        save_config(self.config)
+        self._reload_components()
+        return self.config_status()
+
+    def _reload_components(self) -> None:
+        self.email_channel = EmailChannel(self.config.channels.email, self.bus)
+        self.gmail_reader = GmailReader(self.config)
+        self.email_assistant = EmailAssistant(self.config)
+        self.agent_loop = self._build_agent_loop(self.config, self.bus)
+
+    async def handle_message(self, message: str, session_id: str, email_uid: str = "") -> dict[str, Any]:
+        intent = self.router.detect_intent(message)
+        logger.info("Local intent {} for session {}", intent.name, session_id)
+
+        if intent.action == "read_email":
+            n = int(intent.parameters.get("count") or 10)
+            unread_only = bool(intent.parameters.get("unread_only"))
+            sender_filters = [str(item).strip().lower() for item in (intent.parameters.get("from") or []) if str(item).strip()]
+            emails_result = self.get_latest_emails(n, unread_only=unread_only)
+            emails = self._filter_emails_by_sender(emails_result.get("emails", []), sender_filters)
+            self.last_email_list_by_session[session_id] = emails
+            if emails:
+                self.last_email_by_session[session_id] = emails[0]
+            return {
+                "type": "email_list",
+                "emails": emails,
+                "items": emails,
+                "reply": f"Found {len(emails)} email(s).",
+                "unread_only": unread_only,
+                "sender_filters": sender_filters,
+                "intent": intent.to_dict(),
+                "session_id": session_id,
+            }
+
+        if intent.action in {"send_email", "reply_email"}:
+            draft = await self._generate_email_preview(
+                message=message,
+                session_id=session_id,
+                recipients=intent.parameters.get("to") or [],
+                email_uid=email_uid,
+                is_reply=intent.action == "reply_email",
+            )
+            return {
+                **draft,
+                "intent": intent.to_dict(),
+                "session_id": session_id,
+            }
+
+        reply = await self._handle_chat(message, session_id)
+        return {
+            "type": "assistant_message",
+            "reply": reply,
+            "intent": intent.to_dict(),
+            "session_id": session_id,
+        }
+
+    async def _generate_email_preview(
+        self,
+        message: str,
+        session_id: str,
+        recipients: list[str],
+        email_uid: str,
+        is_reply: bool,
+    ) -> dict[str, Any]:
+        selected_email = self._resolve_selected_email(session_id=session_id, message=message, email_id=email_uid)
+        thread_context = ""
+        subject = ""
+        if is_reply:
+            if not selected_email:
+                raise ValueError("No email selected for reply. Ask me to show latest emails first.")
+            thread_context = self._get_thread_for_selected_email(selected_email)
+            subject = str(selected_email.get("subject", "")).strip()
+            recipients = self.email_channel.normalize_recipients(selected_email.get("from", ""))
+            reply_body = await self.email_assistant.generate_reply(
+                thread_text=thread_context,
+                user_instruction=message,
+            )
+            draft = {
+                "to": recipients,
+                "subject": self._reply_subject(subject),
+                "body": reply_body,
+            }
+        else:
+            draft = await self.email_assistant.draft_email(
+                user_input=message,
+                recipients=recipients,
+                thread_context=None,
+            )
+        normalized_to = self.email_channel.normalize_recipients(draft.get("to", []))
+        draft_id = str(uuid4())
+
+        reply_message_id = ""
+        reply_refs = ""
+        if selected_email:
+            reply_message_id = str(selected_email.get("messageId", "")).strip()
+            refs = str(selected_email.get("references", "")).strip()
+            ref_parts = [part for part in refs.split() if part]
+            if reply_message_id and reply_message_id not in ref_parts:
+                ref_parts.append(reply_message_id)
+            reply_refs = " ".join(ref_parts)
+
+        self.drafts[draft_id] = {
+            "to": normalized_to,
+            "subject": draft.get("subject", "").strip(),
+            "body": draft.get("body", "").strip(),
+            "in_reply_to": reply_message_id,
+            "references": reply_refs,
+            "thread_context": thread_context,
+        }
+        return {
+            "type": "email_preview",
+            "draft_id": draft_id,
+            "to": normalized_to,
+            "subject": draft.get("subject", "").strip(),
+            "body": draft.get("body", "").strip(),
+            "thread_context": thread_context,
+        }
+
+    def get_latest_emails(self, n: int, unread_only: bool = False) -> dict[str, Any]:
+        """Fetch latest emails from Gmail API, falling back to IMAP when needed."""
+        try:
+            return self.gmail_reader.get_latest_emails(n, unread_only=unread_only)
+        except GmailReaderError as exc:
+            logger.info("Gmail API unavailable for local mail read; using IMAP fallback.")
+            try:
+                items = self.email_channel.fetch_recent_messages(
+                    limit=max(1, int(n)),
+                    unread_only=unread_only,
+                    mark_seen=False,
+                )
+            except Exception as imap_exc:
+                raise ValueError(str(exc)) from imap_exc
+            return {
+                "type": "email_list",
+                "emails": [self._imap_message_to_local_email(item) for item in items],
+                "source": "imap",
+                "warning": str(exc),
+            }
+
+    def get_thread(self, thread_id: str) -> str:
+        """Fetch full email thread text from Gmail API."""
+        try:
+            return self.gmail_reader.get_thread(thread_id)
+        except GmailReaderError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _get_thread_for_selected_email(self, selected_email: dict[str, Any]) -> str:
+        thread_id = str(selected_email.get("threadId", "")).strip()
+        if thread_id:
+            return self.get_thread(thread_id)
+
+        uid = str(selected_email.get("uid", "") or selected_email.get("id", "")).strip()
+        if not uid:
+            raise ValueError("No email selected for reply. Ask me to show latest emails first.")
+
+        try:
+            items = self.email_channel.fetch_thread_by_uid(uid)
+        except Exception as exc:
+            raise ValueError(f"Failed to fetch email thread from IMAP: {exc}") from exc
+        if not items:
+            raise ValueError("Could not find the email thread for the selected message.")
+        blocks = [str(item.get("content", "")).strip() for item in items if str(item.get("content", "")).strip()]
+        return "\n\n".join(blocks).strip()
+
+    @staticmethod
+    def _imap_message_to_local_email(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata", {}) or {}
+        uid = str(metadata.get("uid", "")).strip()
+        message_id = str(item.get("message_id") or metadata.get("message_id", "")).strip()
+        content = str(item.get("content", "")).strip()
+        return {
+            "id": uid or message_id,
+            "uid": uid,
+            "threadId": "",
+            "messageId": message_id,
+            "from": item.get("sender", ""),
+            "to": item.get("to", "") or metadata.get("to", ""),
+            "subject": item.get("subject", ""),
+            "date": item.get("date", "") or metadata.get("date", ""),
+            "references": metadata.get("references", ""),
+            "snippet": _imap_preview_from_content(content),
+            "preview": _imap_preview_from_content(content),
+            "body": content,
+            "source": "imap",
+        }
+
+    @staticmethod
+    def _filter_emails_by_sender(emails: list[dict[str, Any]], sender_filters: list[str]) -> list[dict[str, Any]]:
+        if not sender_filters:
+            return list(emails)
+        normalized_filters = {value.strip().lower() for value in sender_filters if value.strip()}
+        filtered: list[dict[str, Any]] = []
+        for item in emails:
+            sender = str(item.get("from", "")).lower()
+            if any(token in sender for token in normalized_filters):
+                filtered.append(item)
+        return filtered
+
+    @staticmethod
+    def _reply_subject(subject: str) -> str:
+        clean = (subject or "").strip()
+        if clean.lower().startswith("re:"):
+            return clean
+        return f"Re: {clean or 'Conversation'}"
+
+    def _resolve_selected_email(self, session_id: str, message: str, email_id: str = "") -> dict[str, Any]:
+        if email_id:
+            for item in self.last_email_list_by_session.get(session_id, []):
+                if str(item.get("id", "")) == email_id:
+                    return item
+
+        emails = self.last_email_list_by_session.get(session_id, [])
+        if not emails:
+            return self.last_email_by_session.get(session_id, {})
+
+        match = re.search(r"\b(\d{1,2})\b", message or "")
+        if match:
+            idx = int(match.group(1)) - 1
+            if 0 <= idx < len(emails):
+                return emails[idx]
+
+        return self.last_email_by_session.get(session_id, emails[0])
+
+    async def send_email(self, payload: dict[str, Any]) -> dict[str, Any]:
+        draft_id = str(payload.get("draft_id", "")).strip()
+        draft = self.drafts.get(draft_id, {})
+        to_value = payload.get("to", draft.get("to", []))
+        recipients = self.email_channel.normalize_recipients(to_value)
+        subject = str(payload.get("subject", draft.get("subject", ""))).strip()
+        body = str(payload.get("body", draft.get("body", ""))).strip()
+        if not recipients:
+            raise ValueError("At least one recipient is required.")
+        if not subject:
+            raise ValueError("Subject is required.")
+        if not body:
+            raise ValueError("Body is required.")
+
+        await self.email_channel.send_email(
+            recipients=recipients,
+            subject=subject,
+            body=body,
+            in_reply_to=str(draft.get("in_reply_to", "")),
+            references=str(draft.get("references", "")),
+        )
+        if draft_id:
+            self.drafts.pop(draft_id, None)
+        return {
+            "type": "email_sent",
+            "reply": f"Email sent to {', '.join(recipients)}",
+            "to": recipients,
+            "subject": subject,
+        }
+
+    def list_emails(self, limit: int = 10, unread_only: bool = False) -> list[dict[str, Any]]:
+        result = self.get_latest_emails(limit, unread_only=unread_only)
+        emails: list[dict[str, Any]] = []
+        for item in result.get("emails", []):
+            emails.append(
+                {
+                    "id": str(item.get("id", "")),
+                    "threadId": str(item.get("threadId", "")),
+                    "messageId": str(item.get("messageId", "")),
+                    "from": item.get("from", ""),
+                    "to": item.get("to", ""),
+                    "subject": item.get("subject", ""),
+                    "date": item.get("date", ""),
+                    "references": item.get("references", ""),
+                    "snippet": item.get("snippet", ""),
+                    "preview": _preview_email(item.get("body", "")),
+                    "body": item.get("body", ""),
+                }
+            )
+        return emails
+
+    async def _handle_chat(self, message: str, session_id: str) -> str:
+        if not self.agent_loop:
+            return "Assistant is ready, but no model is configured yet. Open Settings to finish setup."
+        return await self.agent_loop.process_direct(
+            message,
+            session_key=f"local:{session_id}",
+            channel="local",
+            chat_id=session_id,
+        )

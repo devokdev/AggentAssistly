@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentAssistly</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="appShell" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>AgentAssistly</h1>
+        <p>Your local AI assistant</p>
+      </div>
+      <button id="newChat" class="btn ghost">New Chat</button>
+      <section class="history-wrap">
+        <h2>History</h2>
+        <ul id="historyList" class="history-list"></ul>
+      </section>
+      <button id="openSettings" class="btn ghost">Settings</button>
+    </aside>
+
+    <main class="main">
+      <div class="chat-shell">
+        <section id="messages" class="messages" aria-live="polite"></section>
+        <div id="typing" class="typing hidden"><span></span><span></span><span></span></div>
+        <form id="composer" class="composer">
+          <textarea id="messageInput" rows="1" placeholder="Message AgentAssistly..."></textarea>
+          <button type="submit" class="btn">Send</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <div id="onboarding" class="overlay hidden">
+    <div class="card">
+      <h2>Welcome to AgentAssistly</h2>
+      <p>Complete one-time setup to start chatting naturally.</p>
+      <form id="configForm" class="stack">
+        <label>
+          Gemini API Key
+          <input id="geminiApiKey" type="password" required />
+        </label>
+        <label>
+          Google Credentials JSON
+          <textarea id="googleCredentialsJson" rows="6" required placeholder='{"installed":{...}}'></textarea>
+        </label>
+        <p class="small">Optional email settings (for send/read/reply):</p>
+        <label>IMAP Host <input id="imapHost" type="text" placeholder="imap.gmail.com" /></label>
+        <label>IMAP Port <input id="imapPort" type="number" placeholder="993" /></label>
+        <label>IMAP Username <input id="imapUsername" type="email" placeholder="your@gmail.com" /></label>
+        <label>IMAP Password <input id="imapPassword" type="password" /></label>
+        <label>SMTP Host <input id="smtpHost" type="text" placeholder="smtp.gmail.com" /></label>
+        <label>SMTP Port <input id="smtpPort" type="number" placeholder="587" /></label>
+        <label>SMTP Username <input id="smtpUsername" type="email" placeholder="your@gmail.com" /></label>
+        <label>SMTP Password <input id="smtpPassword" type="password" /></label>
+        <label>From Address <input id="fromAddress" type="email" placeholder="your@gmail.com" /></label>
+        <button type="submit">Save and Continue</button>
+      </form>
+      <p id="onboardingError" class="error"></p>
+    </div>
+  </div>
+
+  <div id="emailModal" class="overlay hidden">
+    <div class="card">
+      <h2>Email Preview</h2>
+      <p id="emailContext" class="small hidden"></p>
+      <label>To <input id="emailTo" type="text" placeholder="a@example.com, b@example.com" /></label>
+      <label>Subject <input id="emailSubject" type="text" /></label>
+      <label>Body <textarea id="emailBody" rows="12"></textarea></label>
+      <div class="actions">
+        <button id="sendEmail" type="button" class="btn">Send</button>
+        <button id="cancelEmail" type="button" class="btn ghost">Cancel</button>
+      </div>
+      <p id="emailError" class="error"></p>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
