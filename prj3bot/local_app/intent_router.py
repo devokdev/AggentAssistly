@@ -8,6 +8,7 @@ from typing import Any
 
 
 EMAIL_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
+REPLY_OBJECT_WORDS = ("email", "emails", "mail", "mails", "message", "messages")
 
 
 def _normalize(text: str) -> str:
@@ -77,7 +78,20 @@ class IntentRouter:
                 clarification="Tell me what you want to do.",
             )
 
-        if any(phrase in lowered for phrase in ("reply to this email", "reply to that email", "reply to email")):
+        if any(
+            phrase in lowered
+            for phrase in (
+                "reply to this email",
+                "reply to that email",
+                "reply to email",
+                "reply to this mail",
+                "reply to that mail",
+                "reply to mail",
+                "reply to this message",
+                "reply to that message",
+                "reply to message",
+            )
+        ):
             return IntentMatch(
                 name="reply_email",
                 tool="email",
@@ -86,7 +100,7 @@ class IntentRouter:
                 parameters={},
             )
 
-        if "reply" in lowered and "email" in lowered:
+        if "reply" in lowered and any(word in lowered for word in REPLY_OBJECT_WORDS):
             return IntentMatch(
                 name="reply_email",
                 tool="email",

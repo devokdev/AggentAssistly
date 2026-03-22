@@ -54,6 +54,14 @@ def test_intent_router_detects_read_mail_from_specific_sender() -> None:
     assert intent.parameters["from"] == ["kartavyadev3@gmail.com"]
 
 
+def test_intent_router_detects_reply_mail_by_name() -> None:
+    router = IntentRouter()
+    intent = router.detect("Reply to the Shiv Nadar mail saying thank you for the opportunity")
+
+    assert intent.name == "reply_email"
+    assert intent.action == "reply_email"
+
+
 def test_intent_router_detects_docs_create() -> None:
     router = IntentRouter()
     intent = router.detect("Create a Google Doc titled Project Notes with agenda items and next steps.")

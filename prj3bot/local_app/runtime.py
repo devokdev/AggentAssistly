@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -16,9 +17,11 @@ from prj3bot.bus.queue import MessageBus
 from prj3bot.channels.email import EmailChannel
 from prj3bot.config.loader import load_config, save_config
 from prj3bot.config.schema import Config
+from prj3bot.cli.commands import _gog_generate_doc_draft
 from prj3bot.local_app.email_assistant import EmailAssistant
 from prj3bot.local_app.gmail_reader import GmailReader, GmailReaderError
 from prj3bot.local_app.intent_router import IntentRouter
+from prj3bot.integrations.google_workspace import GoogleWorkspaceClient, GoogleWorkspaceError
 from prj3bot.utils.helpers import sync_workspace_templates
 
 
@@ -77,6 +80,42 @@ def _clean_email_text(value: str) -> str:
     text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _normalize_lookup_text(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _lookup_tokens(value: str) -> list[str]:
+    stopwords = {
+        "a", "an", "and", "any", "as", "at", "by", "email", "for", "from", "mail", "mails",
+        "message", "messages", "my", "of", "on", "please", "regarding", "reply", "respond",
+        "saying", "send", "that", "the", "this", "to", "with",
+    }
+    return [token for token in _normalize_lookup_text(value).split() if len(token) >= 3 and token not in stopwords]
+
+
+def _extract_email_reference_hint(message: str) -> str:
+    normalized = _normalize_lookup_text(message)
+    patterns = (
+        r"(?:reply|respond)\s+to\s+(.+?)\s+(?:email|mail|message)s?\b",
+        r"(?:reply|respond)\s+(.+?)\s+(?:email|mail|message)s?\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            hint = match.group(1).strip()
+            if hint and hint not in {"this", "that"}:
+                return hint
+    return ""
+
+
+def _looks_like_google_doc_request(message: str) -> bool:
+    normalized = _normalize_lookup_text(message)
+    has_doc_word = any(term in normalized for term in ("google doc", "google docs", "document", "doc"))
+    has_create_word = any(term in normalized for term in ("create", "make", "generate", "write", "draft"))
+    return has_doc_word and has_create_word
 
 
 def _format_email_date(value: str) -> str:
@@ -301,6 +340,14 @@ class LocalAppRuntime:
                 "session_id": session_id,
             }
 
+        if intent.action == "google_tools" and _looks_like_google_doc_request(message):
+            result = await self._create_google_doc_preview(message)
+            return {
+                **result,
+                "intent": intent.to_dict(),
+                "session_id": session_id,
+            }
+
         reply = await self._handle_chat(message, session_id)
         return {
             "type": "assistant_message",
@@ -499,7 +546,39 @@ class LocalAppRuntime:
             if 0 <= idx < len(emails):
                 return emails[idx]
 
+        hinted = self._resolve_selected_email_by_name(emails, message)
+        if hinted:
+            return hinted
+
         return self.last_email_by_session.get(session_id, emails[0])
+
+    @staticmethod
+    def _resolve_selected_email_by_name(emails: list[dict[str, Any]], message: str) -> dict[str, Any]:
+        hint = _extract_email_reference_hint(message)
+        hint_tokens = _lookup_tokens(hint)
+        fallback_tokens = _lookup_tokens(message)
+        best_item: dict[str, Any] = {}
+        best_score = 0
+
+        for item in emails:
+            haystack = _normalize_lookup_text(
+                f"{item.get('from', '')} {item.get('subject', '')}"
+            )
+            score = 0
+
+            if hint and hint in haystack:
+                score += 10
+            if hint_tokens:
+                score += sum(2 for token in hint_tokens if token in haystack)
+            else:
+                score += sum(1 for token in fallback_tokens if token in haystack)
+
+            if score > best_score:
+                best_score = score
+                best_item = item
+
+        threshold = 2 if hint_tokens else 1
+        return best_item if best_score >= threshold else {}
 
     async def send_email(self, payload: dict[str, Any]) -> dict[str, Any]:
         draft_id = str(payload.get("draft_id", "")).strip()
@@ -529,6 +608,30 @@ class LocalAppRuntime:
             "reply": f"Email sent to {', '.join(recipients)}",
             "to": recipients,
             "subject": subject,
+        }
+
+    async def _create_google_doc_preview(self, message: str) -> dict[str, Any]:
+        draft = await _gog_generate_doc_draft(self.config, message)
+        if isinstance(draft, str):
+            raise ValueError(draft)
+
+        title, body = draft
+        try:
+            client = GoogleWorkspaceClient.from_config(self.config.google_workspace)
+            created = await asyncio.to_thread(client.docs_create, title, body)
+        except GoogleWorkspaceError as exc:
+            raise ValueError(str(exc)) from exc
+        except Exception as exc:
+            raise ValueError(f"Failed to create Google Doc: {exc}") from exc
+
+        return {
+            "type": "document_preview",
+            "provider": "google_docs",
+            "document_id": created.get("id", ""),
+            "title": created.get("title", title),
+            "content": body,
+            "url": created.get("url", ""),
+            "reply": f"Google Doc created: {created.get('title', title)}",
         }
 
     def list_emails(self, limit: int = 10, unread_only: bool = False) -> list[dict[str, Any]]:

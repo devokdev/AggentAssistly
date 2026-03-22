@@ -277,6 +277,80 @@
     messages.scrollTop = messages.scrollHeight;
   }
 
+  function renderDocumentPreview(container, data) {
+    container.innerHTML = "";
+
+    const card = document.createElement("section");
+    card.className = "doc-preview-card";
+
+    const header = document.createElement("div");
+    header.className = "doc-preview-header";
+
+    const headingGroup = document.createElement("div");
+    headingGroup.className = "doc-preview-heading";
+
+    const title = document.createElement("h3");
+    title.className = "doc-preview-title";
+    title.textContent = data.title || "Untitled document";
+
+    const subtitle = document.createElement("p");
+    subtitle.className = "doc-preview-subtitle";
+    subtitle.textContent = "Saved to Google Docs";
+
+    headingGroup.append(title, subtitle);
+
+    const actions = document.createElement("div");
+    actions.className = "doc-preview-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn ghost doc-action";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", async () => {
+      const text = data.content || "";
+      try {
+        await navigator.clipboard.writeText(text);
+        copyBtn.textContent = "Copied";
+        setTimeout(() => {
+          copyBtn.textContent = "Copy";
+        }, 1400);
+      } catch (_) {
+        copyBtn.textContent = "Copy failed";
+        setTimeout(() => {
+          copyBtn.textContent = "Copy";
+        }, 1400);
+      }
+    });
+
+    const pdfBtn = document.createElement("a");
+    pdfBtn.className = "btn ghost doc-action";
+    pdfBtn.textContent = "Download PDF";
+    pdfBtn.href = `/documents/${encodeURIComponent(data.document_id || "")}/download?format=pdf`;
+
+    const docxBtn = document.createElement("a");
+    docxBtn.className = "btn ghost doc-action";
+    docxBtn.textContent = "Download DOCX";
+    docxBtn.href = `/documents/${encodeURIComponent(data.document_id || "")}/download?format=docx`;
+
+    const openBtn = document.createElement("a");
+    openBtn.className = "btn doc-action";
+    openBtn.textContent = "Open in Google Docs";
+    openBtn.href = data.url || "#";
+    openBtn.target = "_blank";
+    openBtn.rel = "noopener noreferrer";
+
+    actions.append(copyBtn, pdfBtn, docxBtn, openBtn);
+    header.append(headingGroup, actions);
+
+    const preview = document.createElement("div");
+    preview.className = "doc-preview-body";
+    preview.textContent = data.content || "";
+
+    card.append(header, preview);
+    container.appendChild(card);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
   async function sendEditedEmail() {
     emailError.textContent = "";
     const payload = {
@@ -326,6 +400,9 @@
         const msg = addMessage("assistant", "");
         await streamText(msg, "I drafted an email. Please review and send.");
         openEmailModal(data);
+      } else if (data.type === "document_preview") {
+        const msg = addStructuredMessage("assistant", "document-results");
+        renderDocumentPreview(msg, data);
       } else if (data.type === "email_list") {
         const msg = addStructuredMessage("assistant", "email-results");
         renderEmailList(msg, data);

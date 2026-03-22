@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 
+from prj3bot.integrations.google_workspace import GoogleWorkspaceClient, GoogleWorkspaceError
 from prj3bot.local_app.runtime import LocalAppRuntime
 
 
@@ -88,5 +90,34 @@ def create_app(runtime: LocalAppRuntime) -> Flask:
             return jsonify({"type": "email_list", "emails": items, "items": items})
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
+
+    @app.get("/documents/<document_id>/download")
+    def download_document(document_id: str):
+        export_format = str(request.args.get("format", "pdf")).strip().lower()
+        mime_map = {
+            "pdf": ("application/pdf", "pdf"),
+            "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+        }
+        export_meta = mime_map.get(export_format)
+        if not export_meta:
+            return jsonify({"error": "Unsupported document format"}), 400
+
+        try:
+            client = GoogleWorkspaceClient.from_config(runtime.config.google_workspace)
+            payload = client.docs_export(document_id, export_meta[0])
+            details = client.docs_read(document_id)
+        except GoogleWorkspaceError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+        safe_title = (details.get("title", "document") or "document").strip() or "document"
+        filename = f"{safe_title}.{export_meta[1]}".replace("/", "-").replace("\\", "-")
+        return send_file(
+            BytesIO(payload),
+            mimetype=export_meta[0],
+            as_attachment=True,
+            download_name=filename,
+        )
 
     return app

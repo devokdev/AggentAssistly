@@ -8,9 +8,9 @@ import re
 import sys
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from loguru import logger
 
@@ -381,6 +381,12 @@ class GoogleWorkspaceClient:
             "url": f"https://docs.google.com/document/d/{document_id}/edit",
             "text": text,
         }
+
+    def docs_export(self, doc_ref: str, export_mime_type: str) -> bytes:
+        document_id = self._require_id(doc_ref)
+        drive = self._service("drive", "v3")
+        request = drive.files().export(fileId=document_id, mimeType=export_mime_type)
+        return request.execute()
 
     def docs_list(self, limit: int = 10) -> list[dict[str, str]]:
         drive = self._service("drive", "v3")

@@ -166,6 +166,12 @@ body {
   padding: 0;
 }
 
+.bubble.document-results {
+  width: min(100%, 860px);
+  max-width: 100%;
+  padding: 0;
+}
+
 .typing {
   display: flex;
   gap: 5px;
@@ -390,6 +396,62 @@ label {
   color: var(--text);
 }
 
+.doc-preview-card {
+  display: grid;
+  gap: 18px;
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-muted) 100%);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 22px;
+  box-shadow: var(--shadow-soft);
+}
+
+.doc-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.doc-preview-heading {
+  display: grid;
+  gap: 6px;
+}
+
+.doc-preview-title {
+  margin: 0;
+  font-size: 1.08rem;
+  line-height: 1.4;
+}
+
+.doc-preview-subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.doc-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.doc-action {
+  text-decoration: none;
+}
+
+.doc-preview-body {
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 18px;
+  padding: 18px;
+  white-space: pre-wrap;
+  line-height: 1.72;
+}
+
 #emailBody {
   min-height: 360px;
   resize: vertical;
@@ -453,5 +515,13 @@ label {
   .modal-actions {
     padding-left: 18px;
     padding-right: 18px;
+  }
+
+  .doc-preview-header {
+    flex-direction: column;
+  }
+
+  .doc-preview-actions {
+    justify-content: flex-start;
   }
 }

@@ -212,3 +212,81 @@ async def test_generate_reply_preview_uses_imap_thread_when_gmail_thread_missing
     assert "First message." in preview["thread_context"]
     assert "Second message." in preview["thread_context"]
     assert preview["subject"] == "Re: IMAP Thread"
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_preview_resolves_email_by_name_hint() -> None:
+    runtime = _make_runtime()
+    runtime.last_email_list_by_session["s1"] = [
+        {
+            "id": "1",
+            "threadId": "thread-1",
+            "from": "Thapar University <news@alerts.sarvgyan.com>",
+            "subject": "Thapar Institute of Engineering & Technology 2026 application released",
+            "messageId": "<m1@example.com>",
+            "references": "",
+        },
+        {
+            "id": "2",
+            "threadId": "thread-2",
+            "from": "SNU Chennai <news@alerts.sarvgyan.com>",
+            "subject": "Shiv Nadar University Chennai application closing soon",
+            "messageId": "<m2@example.com>",
+            "references": "",
+        },
+    ]
+    runtime.last_email_by_session["s1"] = runtime.last_email_list_by_session["s1"][0]
+    runtime.get_thread = lambda thread_id: f"Thread for {thread_id}"
+
+    async def _generate_reply(thread_text: str, user_instruction: str) -> str:
+        return "Thank you for the opportunity."
+
+    runtime.email_assistant = SimpleNamespace(generate_reply=_generate_reply)
+
+    preview = await runtime._generate_email_preview(
+        message="reply to the shiv nadar mail saying thank you for opportunity",
+        session_id="s1",
+        recipients=[],
+        email_uid="",
+        is_reply=True,
+    )
+
+    assert preview["subject"] == "Re: Shiv Nadar University Chennai application closing soon"
+    assert preview["to"] == ["news@alerts.sarvgyan.com"]
+    assert preview["thread_context"] == "Thread for thread-2"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_creates_google_doc_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _make_runtime()
+    runtime.router = IntentRouter()
+    runtime.config.google_workspace.enabled = True
+
+    async def _fake_generate_doc(_config: Config, _instruction: str):
+        return "Project Notes", "Agenda\n\n1. Intro\n2. Next steps"
+
+    monkeypatch.setattr("prj3bot.local_app.runtime._gog_generate_doc_draft", _fake_generate_doc)
+
+    class _FakeClient:
+        def docs_create(self, title: str, content: str):
+            return {
+                "id": "doc123",
+                "title": title,
+                "url": "https://docs.google.com/document/d/doc123/edit",
+            }
+
+    monkeypatch.setattr(
+        "prj3bot.local_app.runtime.GoogleWorkspaceClient.from_config",
+        lambda _cfg: _FakeClient(),
+    )
+
+    result = await runtime.handle_message(
+        "Create a Google Doc titled Project Notes with agenda items and next steps.",
+        session_id="s1",
+    )
+
+    assert result["type"] == "document_preview"
+    assert result["document_id"] == "doc123"
+    assert result["title"] == "Project Notes"
+    assert "Agenda" in result["content"]
+    assert result["url"] == "https://docs.google.com/document/d/doc123/edit"
