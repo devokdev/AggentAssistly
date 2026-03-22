@@ -79,9 +79,9 @@ def create_app(runtime: LocalAppRuntime) -> Flask:
     @app.get("/emails")
     def emails():
         try:
-            limit = int(request.args.get("limit", "10"))
+            limit = int(request.args.get("limit", "3"))
         except ValueError:
-            limit = 10
+            limit = 3
         unread = request.args.get("unread", "0").lower() in {"1", "true", "yes"}
         try:
             items = runtime.list_emails(limit=limit, unread_only=unread)

@@ -25,7 +25,7 @@ def _extract_emails(text: str) -> list[str]:
     return recipients
 
 
-def _extract_count(text: str, default: int = 10) -> int:
+def _extract_count(text: str, default: int = 3) -> int:
     match = re.search(r"\b(\d{1,2})\b", text or "")
     if not match:
         return default
@@ -106,7 +106,7 @@ class IntentRouter:
                 confidence=0.92,
                 parameters={
                     "unread_only": "unread" in lowered,
-                    "count": _extract_count(lowered, default=10),
+                    "count": _extract_count(lowered, default=3),
                     "from": sender_filters,
                 },
             )

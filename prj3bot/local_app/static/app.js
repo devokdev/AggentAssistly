@@ -46,6 +46,15 @@
     return bubble;
   }
 
+  function addStructuredMessage(role, className = "") {
+    const bubble = document.createElement("article");
+    bubble.className = `bubble ${role} ${className}`.trim();
+    bubble.dataset.role = role;
+    messages.appendChild(bubble);
+    messages.scrollTop = messages.scrollHeight;
+    return bubble;
+  }
+
   function toggleTyping(isLoading) {
     if (isLoading) {
       show(typing);
@@ -202,6 +211,72 @@
     hide(emailModal);
   }
 
+  function sanitizeEmailBody(body) {
+    const source = (body || "").toString().replace(/\r\n/g, "\n").trim();
+    if (!source) {
+      return "(No preview available)";
+    }
+    if (source.toLowerCase().startsWith("email received.")) {
+      const parts = source.split(/\n\n/, 2);
+      return (parts[1] || source).trim();
+    }
+    return source;
+  }
+
+  function renderEmailList(container, data) {
+    const items = data.items || data.emails || [];
+    container.innerHTML = "";
+
+    const wrap = document.createElement("section");
+    wrap.className = "email-list";
+
+    const intro = document.createElement("div");
+    intro.className = "email-list-header";
+    intro.textContent = items.length
+      ? `Showing ${items.length} email${items.length === 1 ? "" : "s"}`
+      : "No emails found";
+    wrap.appendChild(intro);
+
+    items.forEach((item) => {
+      const card = document.createElement("article");
+      card.className = "email-card";
+
+      const subject = document.createElement("h3");
+      subject.className = "email-card-subject";
+      subject.textContent = item.subject || "(No Subject)";
+      card.appendChild(subject);
+
+      const meta = document.createElement("dl");
+      meta.className = "email-card-meta";
+
+      const fromLabel = document.createElement("dt");
+      fromLabel.textContent = "From";
+      const fromValue = document.createElement("dd");
+      fromValue.textContent = item.from || "Unknown sender";
+      meta.append(fromLabel, fromValue);
+
+      if (item.date) {
+        const dateLabel = document.createElement("dt");
+        dateLabel.textContent = "Date";
+        const dateValue = document.createElement("dd");
+        dateValue.textContent = item.date;
+        meta.append(dateLabel, dateValue);
+      }
+
+      card.appendChild(meta);
+
+      const body = document.createElement("div");
+      body.className = "email-card-body";
+      body.textContent = sanitizeEmailBody(item.body || item.preview || item.snippet || "");
+      card.appendChild(body);
+
+      wrap.appendChild(card);
+    });
+
+    container.appendChild(wrap);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
   async function sendEditedEmail() {
     emailError.textContent = "";
     const payload = {
@@ -252,21 +327,8 @@
         await streamText(msg, "I drafted an email. Please review and send.");
         openEmailModal(data);
       } else if (data.type === "email_list") {
-        const lines = (data.items || data.emails || []).map(
-          (item, idx) => {
-            const parts = [
-              `${idx + 1}. ${item.subject || "(No Subject)"}`,
-              `From: ${item.from || "Unknown sender"}`,
-            ];
-            if (item.date) {
-              parts.push(`Date: ${item.date}`);
-            }
-            parts.push(`Preview: ${item.preview || item.snippet || "(No preview)"}`);
-            return parts.join("\n");
-          }
-        );
-        const msg = addMessage("assistant", "");
-        await streamText(msg, lines.length ? lines.join("\n\n") : "No emails found.");
+        const msg = addStructuredMessage("assistant", "email-results");
+        renderEmailList(msg, data);
       } else {
         const msg = addMessage("assistant", "");
         await streamText(msg, data.reply || "Done.");

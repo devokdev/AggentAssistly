@@ -100,7 +100,7 @@ class GmailReader:
             listing = (
                 service.users()
                 .messages()
-                .list(userId="me", maxResults=max(1, int(n)), q=query)
+                .list(userId="me", maxResults=max(1, int(n)), q=query, labelIds=["INBOX"])
                 .execute()
             )
             refs = listing.get("messages", []) or []

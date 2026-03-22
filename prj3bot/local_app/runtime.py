@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 import re
 from typing import Any
@@ -66,6 +67,79 @@ def _preview_email(content: str, max_len: int = 160) -> str:
 
 def _imap_preview_from_content(content: str) -> str:
     return _preview_email(content or "")
+
+
+def _extract_normalized_emails(value: str | list[str]) -> list[str]:
+    return EmailChannel.normalize_recipients(value)
+
+
+def _clean_email_text(value: str) -> str:
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _format_email_date(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return parsedate_to_datetime(raw).strftime("%d %b %Y, %I:%M %p")
+    except Exception:
+        return raw
+
+
+def _email_summary(item: dict[str, Any], max_len: int = 220) -> str:
+    preview = (
+        str(item.get("preview", "")).strip()
+        or str(item.get("snippet", "")).strip()
+        or _clean_email_text(str(item.get("body", "")).split("\n\n", 1)[-1])
+    )
+    preview = " ".join(preview.split())
+    return preview[: max_len - 3] + "..." if len(preview) > max_len else preview
+
+
+def _email_body_excerpt(item: dict[str, Any], max_len: int = 420) -> str:
+    body = _clean_email_text(str(item.get("body", "")))
+    if body.lower().startswith("email received."):
+        parts = body.split("\n\n", 1)
+        body = parts[1].strip() if len(parts) > 1 else body
+    body = body or str(item.get("snippet", "")).strip() or "(No preview available)"
+    body = body[: max_len - 3] + "..." if len(body) > max_len else body
+    return body
+
+
+def format_email_list_reply(emails: list[dict[str, Any]], sender_filters: list[str] | None = None) -> str:
+    if not emails:
+        return "No emails found."
+
+    lines: list[str] = []
+    if sender_filters:
+        joined = ", ".join(sender_filters)
+        lines.append(f"Showing {len(emails)} email(s) from {joined}.")
+    else:
+        lines.append(f"Showing {len(emails)} email(s).")
+
+    for idx, item in enumerate(emails, start=1):
+        subject = str(item.get("subject", "")).strip() or "(No Subject)"
+        sender = str(item.get("from", "")).strip() or "Unknown sender"
+        date_text = _format_email_date(str(item.get("date", "")))
+        summary = _email_summary(item)
+        excerpt = _email_body_excerpt(item)
+
+        lines.append(
+            "\n".join(
+                [
+                    f"{idx}. {subject}",
+                    f"From: {sender}",
+                    *( [f"Date: {date_text}"] if date_text else [] ),
+                    f"Summary: {summary}",
+                    "Body Preview:",
+                    excerpt,
+                ]
+            )
+        )
+    return "\n\n".join(lines)
 
 
 @dataclass
@@ -194,7 +268,7 @@ class LocalAppRuntime:
         logger.info("Local intent {} for session {}", intent.name, session_id)
 
         if intent.action == "read_email":
-            n = int(intent.parameters.get("count") or 10)
+            n = int(intent.parameters.get("count") or 3)
             unread_only = bool(intent.parameters.get("unread_only"))
             sender_filters = [str(item).strip().lower() for item in (intent.parameters.get("from") or []) if str(item).strip()]
             emails_result = self.get_latest_emails(n, unread_only=unread_only)
@@ -206,7 +280,7 @@ class LocalAppRuntime:
                 "type": "email_list",
                 "emails": emails,
                 "items": emails,
-                "reply": f"Found {len(emails)} email(s).",
+                "reply": format_email_list_reply(emails, sender_filters=sender_filters),
                 "unread_only": unread_only,
                 "sender_filters": sender_filters,
                 "intent": intent.to_dict(),
@@ -300,7 +374,11 @@ class LocalAppRuntime:
     def get_latest_emails(self, n: int, unread_only: bool = False) -> dict[str, Any]:
         """Fetch latest emails from Gmail API, falling back to IMAP when needed."""
         try:
-            return self.gmail_reader.get_latest_emails(n, unread_only=unread_only)
+            result = self.gmail_reader.get_latest_emails(n, unread_only=unread_only)
+            result["emails"] = self._filter_received_emails(result.get("emails", []))
+            if "items" in result:
+                result["items"] = result["emails"]
+            return result
         except GmailReaderError as exc:
             logger.info("Gmail API unavailable for local mail read; using IMAP fallback.")
             try:
@@ -313,7 +391,7 @@ class LocalAppRuntime:
                 raise ValueError(str(exc)) from imap_exc
             return {
                 "type": "email_list",
-                "emails": [self._imap_message_to_local_email(item) for item in items],
+                "emails": self._filter_received_emails([self._imap_message_to_local_email(item) for item in items]),
                 "source": "imap",
                 "warning": str(exc),
             }
@@ -375,6 +453,27 @@ class LocalAppRuntime:
             sender = str(item.get("from", "")).lower()
             if any(token in sender for token in normalized_filters):
                 filtered.append(item)
+        return filtered
+
+    def _filter_received_emails(self, emails: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        own_addresses = {
+            addr
+            for addr in (
+                _extract_normalized_emails(self.config.channels.email.from_address),
+                _extract_normalized_emails(self.config.channels.email.smtp_username),
+                _extract_normalized_emails(self.config.channels.email.imap_username),
+            )
+            for addr in addr
+        }
+        if not own_addresses:
+            return list(emails)
+
+        filtered: list[dict[str, Any]] = []
+        for item in emails:
+            sender_addresses = set(_extract_normalized_emails(str(item.get("from", ""))))
+            if sender_addresses and sender_addresses.intersection(own_addresses):
+                continue
+            filtered.append(item)
         return filtered
 
     @staticmethod

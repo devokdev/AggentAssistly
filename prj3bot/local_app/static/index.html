@@ -63,17 +63,22 @@
   </div>
 
   <div id="emailModal" class="overlay hidden">
-    <div class="card">
-      <h2>Email Preview</h2>
-      <p id="emailContext" class="small hidden"></p>
-      <label>To <input id="emailTo" type="text" placeholder="a@example.com, b@example.com" /></label>
-      <label>Subject <input id="emailSubject" type="text" /></label>
-      <label>Body <textarea id="emailBody" rows="12"></textarea></label>
-      <div class="actions">
-        <button id="sendEmail" type="button" class="btn">Send</button>
-        <button id="cancelEmail" type="button" class="btn ghost">Cancel</button>
+    <div class="card modal-card">
+      <div class="modal-header">
+        <h2>Email Preview</h2>
+        <p class="small">Review the draft, make any edits you need, then send.</p>
       </div>
-      <p id="emailError" class="error"></p>
+      <div class="modal-body">
+        <p id="emailContext" class="context-panel small hidden"></p>
+        <label>To <input id="emailTo" type="text" placeholder="a@example.com, b@example.com" /></label>
+        <label>Subject <input id="emailSubject" type="text" /></label>
+        <label>Body <textarea id="emailBody" rows="16"></textarea></label>
+        <p id="emailError" class="error"></p>
+      </div>
+      <div class="actions modal-actions">
+        <button id="cancelEmail" type="button" class="btn ghost">Cancel</button>
+        <button id="sendEmail" type="button" class="btn">Send</button>
+      </div>
     </div>
   </div>
 

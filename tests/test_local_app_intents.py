@@ -34,7 +34,7 @@ def test_intent_router_detects_read_mail_without_misrouting_to_send() -> None:
 
     assert intent.name == "read_email"
     assert intent.action == "read_email"
-    assert intent.parameters["count"] == 10
+    assert intent.parameters["count"] == 3
 
 
 def test_intent_router_detects_read_mail_count() -> None:

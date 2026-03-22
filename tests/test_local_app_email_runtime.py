@@ -6,7 +6,7 @@ from prj3bot.channels.email import EmailChannel
 from prj3bot.config.schema import Config
 from prj3bot.local_app.gmail_reader import GmailReaderError, _clean_references
 from prj3bot.local_app.intent_router import IntentRouter
-from prj3bot.local_app.runtime import LocalAppRuntime
+from prj3bot.local_app.runtime import LocalAppRuntime, format_email_list_reply
 
 
 def _make_runtime() -> LocalAppRuntime:
@@ -77,6 +77,61 @@ async def test_handle_message_filters_read_results_by_sender() -> None:
     assert result["type"] == "email_list"
     assert len(result["emails"]) == 1
     assert result["emails"][0]["from"] == "kartavyadev3@gmail.com"
+    assert "Showing 1 email(s) from kartavyadev3@gmail.com." in result["reply"]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_reads_three_emails_by_default() -> None:
+    runtime = _make_runtime()
+    runtime.router = IntentRouter()
+    seen: dict[str, int] = {}
+
+    def _get_latest_emails(n: int, unread_only: bool = False):
+        seen["count"] = n
+        return {"type": "email_list", "emails": []}
+
+    runtime.gmail_reader = SimpleNamespace(get_latest_emails=_get_latest_emails)
+
+    await runtime.handle_message("Read my email", session_id="s1")
+
+    assert seen["count"] == 3
+
+
+def test_get_latest_emails_filters_out_sent_mail() -> None:
+    runtime = _make_runtime()
+    runtime.config.channels.email.imap_username = "me@example.com"
+    runtime.gmail_reader = SimpleNamespace(
+        get_latest_emails=lambda n, unread_only=False: {
+            "type": "email_list",
+            "emails": [
+                {"id": "1", "from": "Alice <alice@example.com>", "subject": "Wanted", "body": "first"},
+                {"id": "2", "from": "me@example.com", "subject": "Sent copy", "body": "second"},
+            ],
+        }
+    )
+
+    result = runtime.get_latest_emails(3)
+
+    assert [item["id"] for item in result["emails"]] == ["1"]
+
+
+def test_format_email_list_reply_is_clean_and_readable() -> None:
+    reply = format_email_list_reply(
+        [
+            {
+                "subject": "Project Update",
+                "from": "Alice <alice@example.com>",
+                "date": "Sat, 21 Mar 2026 10:00:00 +0000",
+                "preview": "Quick update on the launch plan.",
+                "body": "Hello team,\n\nHere is the full update with clear next steps.",
+            }
+        ]
+    )
+
+    assert "Showing 1 email(s)." in reply
+    assert "1. Project Update" in reply
+    assert "Summary: Quick update on the launch plan." in reply
+    assert "Body Preview:" in reply
 
 
 @pytest.mark.asyncio
